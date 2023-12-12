@@ -8,3 +8,4 @@ data/tracking_week_7.csv filter=lfs diff=lfs merge=lfs -text
 data/tracking_week_8.csv filter=lfs diff=lfs merge=lfs -text
 data/tracking_week_9.csv filter=lfs diff=lfs merge=lfs -text
 data/tracking_data_2020.csv filter=lfs diff=lfs merge=lfs -text
+multi-modal/mm_v9_state_dict.pth
