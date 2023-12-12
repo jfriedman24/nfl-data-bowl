@@ -1,0 +1,645 @@
+# Author: Jack Friedman
+# Date: 11/16/2023
+# Purpose: Data preprocessing module
+# Changes from last version: 
+#       - Added option to get torch tensors
+
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from math import floor, cos, sin, atan2, pi, radians, sqrt
+import torch
+import tensorflow as tf
+
+def preprocess_plays_df(plays_df, games_df):
+    # Filter for only run plays
+    run_plays = plays_df[-plays_df['playDescription'].str.contains('pass')]
+    
+    run_plays_reduced = run_plays.drop(['yardlineSide', 'yardlineNumber','yardlineSide', 'passResult', 'passLength',
+    'penaltyYards', 'playResult', 'playNullifiedByPenalty', 'passProbability', 
+    'preSnapHomeTeamWinProbability', 'preSnapVisitorTeamWinProbability', 
+    'homeTeamWinProbabilityAdded', 'playDescription',
+    'visitorTeamWinProbilityAdded', 'expectedPoints', 'expectedPointsAdded',
+    'foulName1', 'foulName2', 'foulNFLId1', 'foulNFLId2'], axis = 1)
+    
+    # Rename outcome variable
+    run_plays_reduced = run_plays_reduced.rename(columns = {'prePenaltyPlayResult':'TARGET'})
+
+    # Rename pre-snap variables
+    pre_snap_vars = ['yardsToGo', 'yardlineNumber', 'gameClock']
+    for var in pre_snap_vars:
+        new_name = "preSnap" + var[0].upper() + var[1:]
+    run_plays_reduced = run_plays_reduced.rename(columns = {var:new_name})
+
+    # Convert pre snap game clock into seconds
+    run_plays_reduced['preSnapGameClockSec'] = pd.to_timedelta('00:' + run_plays_reduced['preSnapGameClock']).dt.total_seconds().astype(int)
+    run_plays_reduced = run_plays_reduced.drop(columns=['preSnapGameClock'], axis = 1)
+
+    # One hot encode qualitative variables
+    # qualitative_vars = ["possessionTeam", "defensiveTeam", "offenseFormation"]
+    qualitative_vars = ["offenseFormation", 'ballCarrierDisplayName']
+    run_plays_ohe = pd.get_dummies(data = run_plays_reduced, columns= qualitative_vars)
+
+    # Merge with games data
+    run_df_clean = games_df[['gameId', 'week']].merge(run_plays_ohe, on='gameId')
+
+    print("final plays data shape: " + str(run_df_clean.shape))
+    
+    return run_df_clean  
+
+# Method to pre-process games dataframe
+def preprocess_games_df(games_df):
+    # Select key variables
+    filtered_df = games_df[['gameId', 'homeTeamAbbr']]
+    return filtered_df
+
+# Function that preproceses player dataframe
+def preprocess_players_df(players_df):
+    # Step 0: Convert height to inches
+    players_df['heightInches'] = players_df['height'].str.split('-').apply(lambda x: int(x[0]) * 12 + int(x[1]))
+    
+    # Step 1: Compute age from birthdate
+    # Step 1a: Convert 'birthDate' to datetime (if it's not already in datetime format)
+    players_df['birthDate'] = pd.to_datetime(players_df['birthDate'], errors='coerce')
+
+    # Step 1b: Calculate age using vectorized operations
+    today = datetime.today()
+    players_df['age'] = today.year - players_df['birthDate'].dt.year
+
+    # Step 1c: Handle NaN birthdates
+    players_df.loc[pd.isnull(players_df['birthDate']), 'age'] = np.NaN
+
+    # Step 2: Filter variables (EXCLUDES AGE)
+    # vars = ['nflId', 'heightInches', 'weight', 'age']
+    vars = ['nflId', 'heightInches', 'weight']
+    filtered_df = players_df[vars]
+
+    return filtered_df
+
+ # Helper function to make all plays move in the same direction (right)
+def standardize_direction(merged_df):
+    # Home team boolean (1 = home, 0 = away)
+    merged_df['isHomeTeam'] = (merged_df['club'] == merged_df['homeTeamAbbr']).astype(int)
+
+    # Offensive team boolean (1 = offense, 0 = defense)
+    merged_df['isOnOffense'] = (merged_df['possessionTeam'] == merged_df['club']).astype(int)
+
+    # Play direction
+    merged_df['isDirectionLeft'] = (merged_df['playDirection'] == 'left').astype(int)
+    
+    # Standardize location so all moving towards right end zone
+    merged_df['X_std'] = np.where(merged_df['isDirectionLeft'] == 1, 120 - merged_df['x'], merged_df['x'])
+    
+    merged_df['Y_std'] = np.where(merged_df['isDirectionLeft'] == 1, 160/3  - merged_df['y'], merged_df['y'])
+
+    # Standardize velocity angle
+    merged_df['Dir_std'] = np.where(merged_df['isDirectionLeft'] == 1, np.mod(180 + merged_df['dir'], 360), merged_df['dir'])
+    merged_df['Dir_std'] = (-merged_df['Dir_std'] + 90) % 360  # convert to standard representation
+
+    # Standardize velocity angle
+    merged_df['O_std'] = np.where(merged_df['isDirectionLeft'] == 1, np.mod(180 + merged_df['o'], 360), merged_df['o'])
+    merged_df['O_std'] = (-merged_df['O_std'] + 90) % 360  # convert to standard representation
+
+    # REVIEW THIS!!!!! Set direction and velocity angle of football to be same as the ball carrier
+    merged_df.loc[(merged_df['club'] == 'football'),'Dir_std'] = 90
+    merged_df.loc[(merged_df['club'] == 'football'),'O_std'] = 90
+
+    return merged_df
+
+def preprocess_tracking_df(plays_df_clean, games_df_clean, players_df_clean, tracking_df):
+    # Helper function to filter for run plays
+    def drop_non_run_plays(run_play_ids, tracking_df):
+        print("original tracking df shape: " + str(tracking_df.shape))
+        
+        # Merge to filter unique combinations from tracking_df
+        tracking_df = pd.merge(tracking_df, run_play_ids, on=['gameId', 'playId'], how='inner')
+
+        print("unique play and game id combos: " + str(run_play_ids.shape))
+        print("filtered df shape: " + str(tracking_df.shape))
+        print("number of merge errors: " + str(len(tracking_df[~tracking_df.set_index(['gameId', 'playId']).index.isin(run_play_ids.set_index(['gameId', 'playId']).index)])))
+
+        return tracking_df
+    
+    # Helper methods to link dataframes
+    def join_play_tracking_data(play_df, tracking_df):
+        merged_df = pd.merge(tracking_df, play_df[['gameId','playId','possessionTeam', 'defensiveTeam', 'TARGET']], on=['playId', 'gameId'], how='left')
+        print("joined plays and tracking dataframes")
+        print("original tracking shape: " + str(tracking_df.shape))
+        print("merged data shape: " + str(merged_df.shape))
+        print("-------")
+        return merged_df 
+
+    def join_player_tracking_data(player_df, tracking_df):
+        merged_df = pd.merge(tracking_df, player_df, on=['nflId'], how='left')
+        print("joined players and tracking dataframes")
+        print("original tracking shape: " + str(tracking_df.shape))
+        print("merged data shape: " + str(merged_df.shape))
+        print("-------")
+        return merged_df
+
+    def join_games_tracking_data(games_df, tracking_df):
+        merged_df = pd.merge(tracking_df, games_df, on=['gameId'], how='left')
+        print("joined games and tracking dataframes")
+        print("original tracking shape: " + str(tracking_df.shape))
+        print("merged data shape: " + str(merged_df.shape))
+        print("-------")
+        return merged_df
+
+    # STEP 0: FILTER RUN PLAYS
+    run_play_ids = plays_df_clean[['gameId','playId']].drop_duplicates()
+    filtered_df = drop_non_run_plays(run_play_ids, tracking_df)
+
+    # STEP 1: JOIN DATAFRAMES
+    merged_df = join_play_tracking_data(plays_df_clean, filtered_df)
+    merged_df = join_player_tracking_data(players_df_clean, merged_df)
+    merged_df = join_games_tracking_data(games_df_clean, merged_df)
+
+    # STEP 2: STANDARDIZE DIRECTION
+    merged_df = standardize_direction(merged_df)
+
+    # STEP 3: ONE HOT ENCODING
+    qualitative_vars = ['club']
+    merged_df = pd.get_dummies(data = merged_df, columns= qualitative_vars)
+    print("Old df shape:" + str(merged_df.shape))
+    print("New df shape:" + str(merged_df.shape))
+
+    # STEP 4: DROP IRRELEVANT FEATURES
+    # Drop irrelevant columns
+    irrelevent_vars = ['jerseyNumber', 'displayName', 'possessionTeam', 
+                    'defensiveTeam', 'playDirection', 'homeTeamAbbr',
+                    'x', 'y', 'dir', 'o']
+    merged_df = merged_df.drop(irrelevent_vars, axis = 1)
+
+    # STEP 5: CLIP TARGET VARIABLE
+    merged_df['TARGET'] = np.clip(merged_df['TARGET'], -2.5, 25)
+    
+    return merged_df
+
+# Preprocesses all data
+def preprocess_all_df(plays_df, games_df, players_df, tracking_df):
+    # Clean plays_df
+    print("cleaning plays_df")
+    plays_df_clean = preprocess_plays_df(plays_df, games_df)
+    print("-----\n")
+
+    # Clean games_df
+    print("cleaning games_df")
+    games_df_clean = preprocess_games_df(games_df)
+    print("-----\n")
+
+    # Clean players_df
+    print("cleaning players_df")
+    players_df_clean = preprocess_players_df(players_df)
+    print("-----\n")
+
+    # Clean tracking_df
+    print("cleaning tracking_df")
+    clean_df = preprocess_tracking_df(plays_df_clean, games_df_clean, players_df_clean, tracking_df)
+    print("-----\n")
+
+    return clean_df
+
+def process_2020_data(data_2020):
+    # Step 0: Process team abbreviations
+    def process_team_abbr(df):
+
+        #These are only problems:
+        map_abbr = {'ARI': 'ARZ', 'BAL': 'BLT', 'CLE': 'CLV', 'HOU': 'HST'}
+        for abb in df['PossessionTeam'].unique():
+            map_abbr[abb] = abb
+
+        df['PossessionTeam'] = df['PossessionTeam'].map(map_abbr)
+        df['HomeTeamAbbr'] = df['HomeTeamAbbr'].map(map_abbr)
+        df['VisitorTeamAbbr'] = df['VisitorTeamAbbr'].map(map_abbr)
+
+        df['HomePossession'] = df['PossessionTeam'] == df['HomeTeamAbbr']
+        
+        return df
+    
+    data_2020 = process_team_abbr(data_2020)
+
+    # Step 1: Rename columns
+    # Rename columns so same as 2022 data names (lowercase)
+    data_2020 = data_2020.rename({'GameId':'gameId','PlayId':'playId',
+                    'X':'x', 'Y':'y', 'S':'s', 'A':'a',
+                    'Orientation':'o', 'Dir':'dir',
+                    'NflId':'nflId', 'Season':'season',
+                    'PossessionTeam':'possessionTeam', 'HomeTeamAbbr':'homeTeamAbbr', 
+                    'VisitorTeamAbbr':'visitorTeamAbbr', 
+                    'PlayerWeight':'weight', 'PlayDirection':'playDirection',
+                    'Yards':'TARGET'}, axis = 1)
+        
+    # STEP 2: Select only those columns 
+    selected_columns = ['gameId', 'playId', 'x', 'y', 's', 'a', 'o', 'dir',
+                    'nflId', 'season', 'possessionTeam', 'homeTeamAbbr', 'Team', 'NflIdRusher',
+                    'visitorTeamAbbr', 'weight','playDirection', 'TARGET']
+    data_2020 = data_2020[selected_columns]
+
+    # STEP 3: Get each player's team 
+    data_2020['club'] = np.where(data_2020['Team'] == 'home', data_2020['homeTeamAbbr'], data_2020['visitorTeamAbbr'])
+
+    # Step 4: Create an observation for the football
+    # A: Identify rows where nflId equals NflIdRusher
+    mask = data_2020['nflId'] == data_2020['NflIdRusher']
+
+    # B: Copy these rows
+    new_rows = data_2020[mask].copy()
+
+    # C: Set the nflId in the copied rows to NaN
+    new_rows['nflId'] = np.nan
+
+    # D: Append these rows to the original DataFrame
+    data_2020 = pd.concat([data_2020, new_rows], ignore_index=True)
+
+
+    # STEP 4: STANDARDIZE DIRECTION
+    data_2020 = standardize_direction(data_2020)
+
+    # STEP 5: IMPUTE AND NaN VALUES
+    data_2020.loc[(data_2020.isOnOffense) & data_2020['Dir_std'].isna(),'Dir_std'] = 0.0
+    data_2020.loc[~(data_2020.isOnOffense) & data_2020['Dir_std'].isna(),'Dir_std'] = np.pi
+    data_2020.loc[(data_2020.isOnOffense) & data_2020['O_std'].isna(),'O_std'] = 0.0
+    data_2020.loc[~(data_2020.isOnOffense) & data_2020['O_std'].isna(),'O_std'] = np.pi
+
+    # STEP 5: ONE HOT ENCODING
+    qualitative_vars = ['club']
+    data_2020 = pd.get_dummies(data = data_2020, columns= qualitative_vars)
+    print("Old df shape:" + str(data_2020.shape))
+    print("New df shape:" + str(data_2020.shape))
+
+    # STEP 6: DROP IRRELEVANT FEATURES
+    # Drop irrelevant columns
+    irrelevent_vars = ['possessionTeam', 'playDirection', 
+                       'homeTeamAbbr', 'visitorTeamAbbr', 
+                       'x', 'y', 'dir', 'o', 'Team', 'NflIdRusher']
+    data_2020 = data_2020.drop(irrelevent_vars, axis = 1)
+
+    # STEP 7: CLIP TARGET VARIABLE
+    data_2020['TARGET'] = np.clip(data_2020['TARGET'], -2.5, 25)
+
+    return data_2020
+
+# Helper function that filters tracking df before frame cutoff
+def filter_cutoff_frames(tracking_df_clean):
+    # Step 1: Get the frames where handoff or run occurs 
+    frame_cutoffs = tracking_df_clean[(tracking_df_clean['event'] == 'run') | (tracking_df_clean['event'] == 'handoff')][['gameId', 'playId', 'frameId']].drop_duplicates()
+
+    # Step 2: Handle duplicate handoffs 
+
+    # # Option A: Keep the later handoff event + drop the first one
+    # frame_cutoffs = frame_cutoffs.loc[frame_cutoffs.groupby(['gameId', 'playId'])['frameId'].idxmax()]  # keeps the max frame with a duplicate
+
+    # Option B: Drop all duplicate handoff plays
+    frame_cutoffs = frame_cutoffs.drop_duplicates(subset=['gameId', 'playId'], keep=False)
+
+    # Step 3: Rename cutoff column
+    frame_cutoffs = frame_cutoffs.rename(columns = {'frameId':'frame_cutoff'})
+
+    # Step 4: Merge cutoffs with the original dataframe 
+    tracking_df_clean = pd.merge(tracking_df_clean, frame_cutoffs, on=['gameId', 'playId'])
+
+    # Step 5: Filter tracking data before cutoff
+    print("shape before frame cutoff filter: " + str(tracking_df_clean.shape))
+    tracking_df_clean = tracking_df_clean[tracking_df_clean['frameId'] <= tracking_df_clean['frame_cutoff']]
+    print("shape after frame cutoff filter: " + str(tracking_df_clean.shape))
+
+    return tracking_df_clean
+
+# Helper function to determine if a coordinate is out of out of bounds
+def is_out_of_bounds(x, y):
+    i = int(x)
+    j = int(y)
+    return i < 0 or i > 119 or j < 0 or j > 53
+
+# NEW SCHEMA
+# Channel 0: Record position of this player
+# Channe; 1: Ball present in this cell?
+# Channel 2: % offensive players in this cell
+# Channel 3: Record defensive player ratio
+# Channel 4: Net velocity vector (x component, standardized 0-1)
+# Channel 5: Net velocity vector (y component, standardized 0-1)
+# Channel 6: Net acceleration vector (x component, standardized 0-1)
+# Channel 7: Net acceleration vector (y component, standardized 0-1)
+
+# Other channels to consider removing
+# Channel 8: % home team in this cell
+# Channel 9: % away team in this cell
+
+# Helper function taht builds a tensor for a frame of tracking data
+def build_tensor(single_frame_data, max_s, max_a, max_weight):
+    # STEP 0: Create a blank matrix
+    image = np.zeros((120, 54, 10))
+
+    # STEP 1: Record ball location before looping through players in Channel 1
+    i = int(single_frame_data[single_frame_data['nflId'].isnull()]['X_std'])
+    j = int(single_frame_data[single_frame_data['nflId'].isnull()]['Y_std'])
+    # Make sure ball is inbounds 
+    if not is_out_of_bounds(i, j):
+        image[i, j, 1] = 1
+
+    # STEP 2: Drop football from dataframe
+    single_frame_data = single_frame_data.dropna(subset=['nflId'])
+
+    # STEP 3: Populate player channels, person by person
+    total_num_players_checked_on_field = 0
+    num_players = np.zeros((120, 54, 4))  # Depth 0 is offense channel Depth 1 is defense, depth 2 is home, depth 3 is away
+    temp_values = {}   # holds temporary values for calculating variances (0 = s, 1 = a, 2 = h, 3 = w)
+    
+    for _, row in single_frame_data.iterrows():
+        # Keep track of x and y locations of player (matrix indices)
+        i = int(row['X_std'])
+        j = int(row['Y_std'])
+        
+        # Make sure player is in the frame 
+        if is_out_of_bounds(i, j):
+            continue
+
+        # Update total number of players checked
+        total_num_players_checked_on_field += 1
+
+        # Channel 0: Record position of this player
+        image[i, j, 0] = (image[i, j, 0] * 22 + 1) / 22
+
+        # Keep track of people on offense and defense
+        if row['isOnOffense'] == 1:
+            num_players[i, j, 0] += 1  # record offensive player
+        else: 
+            num_players[i, j, 1] += 1  # record defensive player
+        total_players_in_cell = num_players[i, j, 0] + num_players[i, j, 1]
+        
+        # Channel 2: % offensive players in this cell
+        # Channel 3: Record defensive player ratio
+        image[i, j, 2] = num_players[i, j, 0] / (num_players[i, j, 0] + num_players[i, j, 1])  # calculate % offensive players at this cell
+        image[i, j, 3] = num_players[i, j, 1] / (num_players[i, j, 0] + num_players[i, j, 1])  # calculate % offensive players at this cell
+
+        # Keep track of height and other values for later computation
+        if (i, j) not in temp_values.keys():
+            temp_values[(i, j)] = {
+                                'vx': 0,
+                                'vy': 0,
+                                'fx': 0,
+                                'fy': 0}
+    
+        # Update net velocity vector (x component, standardized 0-1)
+        temp_values[(i, j)]['vx'] += (row['s'] / max_s) * cos(radians(row['Dir_std']))
+
+        # Update net velocity vector (y component, standardized 0-1)
+        temp_values[(i, j)]['vy'] += (row['s'] / max_s) * sin(radians(row['Dir_std']))
+
+        # Update net force vector (x component, standardized 0-1)
+        temp_values[(i, j)]['fx'] += ((row['weight'] * row['a']) / (max_weight * max_a)) * cos(radians(row['O_std']))
+
+        # Update net force vector (y component, standardized 0-1)
+        temp_values[(i, j)]['fy'] += ((row['weight'] * row['a']) / (max_weight * max_a)) * sin(radians(row['O_std']))
+
+        # Keep track of people home and away
+        if row['isHomeTeam'] == 1:
+            num_players[i, j, 2] += 1  # record home team player
+        else: 
+            num_players[i, j, 3] += 1  # record away team player
+        # Update channels
+        # Channel 8: % home team in this cell
+        # Channel 9: % away team in this cell
+        image[i, j, 8] = num_players[i, j, 2] / total_players_in_cell  # calculate % home team players at this cell
+        image[i, j, 9] = num_players[i, j, 3] / total_players_in_cell  # calculate % away team players at this cell
+
+    # Compute variances 
+    for (i, j) in temp_values.keys():
+        # # Get sample size:
+        # n = len(temp_values[(i,j)]['vx'])
+
+        # Channel 4: Velocity vector (magnitude)
+        image[i, j, 4] = sqrt(temp_values[(i,j)]['vx']**2 + temp_values[(i,j)]['vy']**2) 
+
+        # Channel 5: Velocity vector (angle, standardized 0-1)
+        image[i, j, 5] = (atan2(temp_values[(i,j)]['vy'], temp_values[(i,j)]['vx']) % (2*pi)) / (2*pi) if (temp_values[(i,j)]['vy'] != 0) else 1
+
+        # Channel 6: Force vector (magnitude)
+        image[i, j, 6] = sqrt(temp_values[(i,j)]['fx']**2 + temp_values[(i,j)]['fy']**2) 
+
+        # Channel 7: Force vector (angle, standardized 0-1)
+        image[i, j, 7] = (atan2(temp_values[(i,j)]['fy'], temp_values[(i,j)]['fx']) % (2*pi)) / (2*pi) if (temp_values[(i,j)]['fy'] != 0) else 1 
+    
+    # Convert matrix to a tensor
+    tensor = tf.convert_to_tensor(image, dtype=tf.float32)
+    return tensor
+
+def process_batch(play_group, max_s, max_a, max_height, max_weight):
+    # Hold in an array (faster than concatenating a df every row)
+    tensor_rows = []
+
+    # Loop through every play
+    for group_df in play_group:
+        game_id = group_df['gameId'].iloc[0]
+        play_id = group_df['playId'].iloc[0]
+        target = group_df['TARGET'].iloc[0]
+        # Loop through every frame in that play
+        frame_groups = group_df.groupby(['frameId'])
+        for frame_id, frame_df in frame_groups:
+            # Build tensor for that frame
+            tensor = build_tensor(frame_df, max_s = max_s, max_a = max_a, max_height = max_height, max_weight = max_weight)
+            
+            # Keep track of row
+            new_row = {
+                'gameId': [game_id], 
+                'playId': [play_id], 
+                'frameId': [frame_id], 
+                'frame_cutoff': [frame_df['frame_cutoff'].iloc[0]], 
+                'field_tensor': [tensor],
+                'TARGET': [target]
+            }
+            tensor_rows += [new_row]
+
+    # Build dataframe
+    tensor_df = pd.DataFrame(tensor_rows)
+    return tensor_df
+
+def get_batches(groupby_object, num_batches):
+    # Get the keys of the groups
+    group_keys = list(groupby_object.groups.keys())
+
+    # Calculate the number of keys in each batch
+    keys_per_batch = len(group_keys) // num_batches
+
+    # Initialize an empty list to store the batches
+    batches = []
+
+    # Split the keys into batches
+    for i in range(0, len(group_keys), keys_per_batch):
+        batch_keys = group_keys[i:i + keys_per_batch]
+        batch = [groupby_object.get_group(key) for key in batch_keys]
+        batches.append(batch)
+
+    return batches
+
+# Method to create tensor dataframe
+def build_tensor_df(tracking_df_clean):
+    # Get max s, a, height, weight for normalization
+    max_a = tracking_df_clean['a'].max()
+    max_s = tracking_df_clean['s'].max()
+    max_height = tracking_df_clean['heightInches'].max()   
+    max_weight = tracking_df_clean['weight'].max()  
+
+
+    # STEP 0: FILTER FRAME CUTOFFS
+    tracking_df_clean = filter_cutoff_frames(tracking_df_clean)
+
+    # STEP 1: CREATE TENSOR DATAFRAME VIA BATCH PROCESSING
+    tensor_df = pd.DataFrame(columns = ['gameId', 'playId', 'frameId', 
+                                    'frame_cutoff', 'field_tensor', 'TARGET'])
+
+    play_groups = tracking_df_clean.groupby(['gameId', 'playId'])
+    batches = get_batches(play_groups, 6)
+
+    for i in range(len(batches)):
+        print("processing batch " + str(i))
+        batch = batches[i]
+        new_batch_df = process_batch(batch, max_s, max_a, max_height, max_weight)
+        tensor_df = pd.concat([tensor_df, new_batch_df])
+
+    return tensor_df
+
+
+# Method to sample a uniform number of frames
+def uniform_frame_sampling(video_tensor, n):
+    """
+    Uniformly sample n frames from a video tensor.
+
+    Parameters:
+    - video_tensor: 4D numpy array representing the video (frames, height, width, channels).
+    - n: Number of frames to sample.
+
+    Returns:
+    - sampled_tensor: 4D numpy array with n sampled frames.
+    """
+
+    # Convert NumPy array to TensorFlow constant tensor
+    indices = tf.constant(np.linspace(0, video_tensor.shape[0] - 1, n, dtype=int), dtype=tf.int32)
+
+    # Use the calculated indices to sample frames
+    sampled_tensor = tf.gather(video_tensor, indices)
+
+    return sampled_tensor
+
+# Method to build list of 4D tensors and labels
+'''
+    Tensor Type: Controls the type of tensors you get ('torch' = pytorch and 'tf' = tensorflow)
+'''
+def prepare_4d_tensors(tracking_df_clean, min_frames = None, tensor_type = 'tf'):
+    
+    # Get max s, a, height, weight for normalization
+    max_a = tracking_df_clean['a'].max()
+    max_s = tracking_df_clean['s'].max()
+    max_height = tracking_df_clean['heightInches'].max()   
+    max_weight = tracking_df_clean['weight'].max()  
+    
+    # STEP 0: FILTER FRAME CUTOFFS
+    tracking_df_clean = filter_cutoff_frames(tracking_df_clean)
+
+    # STEP 1: CREATE LIST OF 4D TENSORS AND LABELS
+    tensor_list = []
+    labels = []
+    play_ids = []
+
+    play_groups = tracking_df_clean.groupby(['gameId', 'playId'])
+    # Loop through every play
+    for (game_id, play_id), play_df in play_groups:
+        frame_tensors = []
+        # Loop through every frame in the play
+        frame_groups = play_df.groupby(['frameId']) 
+
+        for frame_id, frame_df in frame_groups:
+            label = frame_df['TARGET'].iloc[0]
+
+            # Build tensor for that frame
+            tensor = build_tensor(frame_df, max_s = max_s, max_a = max_a, max_weight = max_weight)
+            
+            # Record tensor
+            frame_tensors += [tensor]
+        
+        # Make 4D tensor
+        play_tensor = tf.convert_to_tensor(np.stack(frame_tensors, axis=0), dtype=tf.float32)
+        
+
+        # Check cutoff
+        if min_frames == None:
+            # Convert tensor if necessary 
+            if tensor_type == 'torch':
+                play_tensor = torch.tensor(play_tensor.numpy())
+            tensor_list += [play_tensor]
+            labels += [label]
+            play_ids += [(game_id, play_id)]
+        elif play_tensor.shape[0] >= min_frames:
+            play_tensor = uniform_frame_sampling(play_tensor, min_frames)
+            
+            # Convert tensor if necessary 
+            if tensor_type == 'torch':
+                play_tensor = torch.tensor(play_tensor.numpy())
+            
+            tensor_list += [play_tensor]
+            labels += [label]
+            play_ids += [(game_id, play_id)]
+
+
+    return play_ids, tensor_list, labels
+
+
+def get_2020_tensors(df_2020_clean, tensor_type = 'torch'):
+    # Get max s, a, weight for normalization
+    max_a = df_2020_clean['a'].max()
+    max_s = df_2020_clean['s'].max()  
+    max_weight = df_2020_clean['weight'].max()  
+    
+    # STEP 1: CREATE LIST OF 3D TENSORS AND LABELS
+    tensor_list = []
+    labels = []
+    play_ids = []
+
+    play_groups = df_2020_clean.groupby(['gameId', 'playId'])
+    # Loop through every play
+    for (game_id, play_id), play_df in play_groups:
+        label = play_df['TARGET'].iloc[0]
+
+        # Build tensor for that frame
+        tensor = build_tensor(play_df, max_s = max_s, max_a = max_a, max_weight = max_weight)
+
+        # Convert tensor if necessary 
+        if tensor_type == 'torch':
+            tensor = torch.tensor(tensor.numpy())
+        
+        # Record tensor
+        tensor_list += [tensor]
+        labels += [label]
+        play_ids += [(game_id, play_id)]
+
+    return play_ids, tensor_list, labels
+
+
+# Method to preprocess plays df ONLY for naive models
+def preprocess_plays_df_naive_models(plays_df, games_df, include_nfl_features = False):
+    # BZasic preprocessing
+    plays_df_clean = preprocess_plays_df(plays_df, games_df)
+
+    # One hot encode possession and defense teams
+    qualitative_vars = ['defensiveTeam', 'possessionTeam']
+    plays_df_clean = pd.get_dummies(data = plays_df_clean, columns= qualitative_vars)
+
+    # Include nfl features if desired
+    if include_nfl_features:
+        plays_df_clean = pd.merge(plays_df_clean, 
+                                          plays_df[['gameId','playId',
+                                                    'preSnapHomeTeamWinProbability',
+                                                    'preSnapVisitorTeamWinProbability',
+                                                    'expectedPoints']], 
+                                           on=['playId', 'gameId'], how='left')
+   
+    # Clip Outcome variable
+    plays_df_clean['TARGET'] = np.clip(plays_df_clean['TARGET'], -2.5, 25)
+    
+    # Cast outcome variable to integer values
+    plays_df_clean['TARGET'] = plays_df_clean['TARGET'].astype(int)
+
+    # Inpute NA defendersInTheBox with 0
+    plays_df_clean.loc[plays_df_clean['defendersInTheBox'].isnull(), 'defendersInTheBox'] = 0
+
+    return plays_df_clean
