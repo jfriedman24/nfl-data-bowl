@@ -1,11 +1,7 @@
-# Test for ViViT using pytorch
-# __Author:__ Jack Friedman <br>
-# __Date:__ 11/21/2024 <br>
-# __Adapted from:__ Aritra Roy Gosthipaty and Ayush Thakur (https://github.com/keras-team/keras-io/blob/master/examples/vision/vivit.py) <br>
-# __Original Paper:__ ViViT: A Video Vision Transformer (https://arxiv.org/abs/2103.15691) by Arnab et al. <br>
-# __Updates from v3:__ 
-# - Fixed passing in cdf to CRPS 
-## Import libraries
+# Author: Jack Friedman 
+# Date 11/21/2024 
+# Adapted from: Aritra Roy Gosthipaty and Ayush Thakur (https://github.com/keras-team/keras-io/blob/master/examples/vision/vivit.py) <br>
+# Original Paper: ViViT: A Video Vision Transformer (https://arxiv.org/abs/2103.15691) by Arnab et al. <br>
 
 ## Import libraries
 import os
