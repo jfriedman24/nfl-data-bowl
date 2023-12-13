@@ -12,8 +12,8 @@ __Project Overview:__ The goal of this project is to predict tackle location on 
 __assets:__ Contains figures and tables used in the paper <br>
 __data:__ Contains all data used in the project, including 2020 and 2024 NFL Big Data Bowl tracking data <br>
 __data-exploration:__ Contains exploratory data analysis code used to generate the distribution of tackle locations/frame count graphs for the paper <br>
-__multi-modal:__ Contains code to train the multi-modal model and the best-performing model state dictionary 
-__preprocessing:__ Contains data loading and preprocessing modules
-__tabnet-model:__ Contains code to train the TabNet model from the play-level data and the model's state dictionary 
-__vit-model:__ Contains code to train the ViT model, the ViT state dictionary pretrained on 2020 data, and the model's state dictionary trained on 2024 data 
-__vivit-model:__ Contains code to the ViViT model and the model's state dictionary 
+__multi-modal:__ Contains code to train the multi-modal model and the best-performing model state dictionary <br>
+__preprocessing:__ Contains data loading and preprocessing modules <br>
+__tabnet-model:__ Contains code to train the TabNet model from the play-level data and the model's state dictionary <br>
+__vit-model:__ Contains code to train the ViT model, the ViT state dictionary pretrained on 2020 data, and the model's state dictionary trained on 2024 data <br>
+__vivit-model:__ Contains code to the ViViT model and the model's state dictionary <br>
