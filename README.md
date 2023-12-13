@@ -1,13 +1,15 @@
 # nfl-data-bowl
 This is the repo for my 2024 NFL Data Bowl Submission. 
 
+## About
+
 __NFL Big Data Bowl 2024 Submission:__ University Track <br>
 __Author:__ Jack Friedman, Dartmouth College <br>
 __Date Submitted:__ December 13, 2023 <br>
 __Project Submission:__ <br>
 __Project Overview:__ The goal of this project is to predict tackle location on NFL rushing plays given data until the time of handoff. <br>
 
-## Repository overview
+## Repository Overview
 
 __assets:__ Contains figures and tables used in the paper <br>
 __data:__ Contains all data used in the project, including 2020 and 2024 NFL Big Data Bowl tracking data <br>
