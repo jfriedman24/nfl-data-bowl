@@ -6,7 +6,7 @@ This is the repo for my 2024 NFL Data Bowl Submission.
 __NFL Big Data Bowl 2024 Submission:__ University Track <br>
 __Author:__ Jack Friedman, Dartmouth College <br>
 __Date Submitted:__ December 13, 2023 <br>
-__Project Submission:__ <br>
+__Project Submission:__ https://www.kaggle.com/code/jackfriedman24/nfl-data-bowl-submission-jack-friedman <br>
 __Project Overview:__ The goal of this project is to predict tackle location on NFL rushing plays given data until the time of handoff. <br><br>
 
 ## Repository Overview
